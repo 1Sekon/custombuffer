@@ -73,7 +73,7 @@ constexpr int kEglDraw = 0x3059;
 // of the PREVIOUS frame (double buffered), so receivers never read a half-built map.
 // Resolution comes from the material: the uniform "ShadowRes" (vec4: x = texels per side, y = depth bits, z/w unused) of the caster
 // program, read once per frame. The map is recreated whenever it changes. Without that uniform: the default.
-constexpr int kShadowSize = 2048;                 // default texels per side
+constexpr int kShadowSize = 1014;                 // default texels per side
 constexpr int kShadowSizeMin = 256, kShadowSizeMax = 4096;
 constexpr GLenum kShadowFormat = GL_DEPTH_COMPONENT16;   // default (ShadowRes.y unset / 0); ShadowRes.y = 24 or 32 picks DEPTH_COMPONENT24 / 32F
 constexpr float kShadowPolySlope = 2.0f, kShadowPolyUnits = 4.0f;  // slope-scaled depth bias while casting
@@ -228,6 +228,8 @@ struct State {
     Track tr;
     Probe probe[kKinds];
     unsigned copyFrame[kKinds] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+    unsigned copyPass[kKinds]  = {0xFFFFFFFFu, 0xFFFFFFFFu};
+    unsigned pass = 0;
     unsigned failedFrames[kKinds] = {}, retries[kKinds] = {};
     std::unordered_map<GLuint, Units> unitsOf;
     Own own[kKinds];
@@ -613,10 +615,12 @@ Bind bindBuffers(State& st, GLint program) {
         Own& own = st.own[k];
         if (unit < 0) continue;
 
-        if (!own.failed && st.copyFrame[k] != st.frame) {
+        if (!own.failed && (st.copyFrame[k] != st.frame || st.copyPass[k] != st.pass)) {
             st.copyFrame[k] = st.frame;
+            st.copyPass[k]  = st.pass;
             capture(st, static_cast<Kind>(k));
         }
+
         const GLuint source = (!own.failed && own.valid && own.tex) ? own.tex : fallbackTexture(st, static_cast<Kind>(k));
         if (!source) continue;
 
@@ -730,7 +734,7 @@ bool ensureShadow(State& st, int size) {
         real.GenTextures(1, &sh.tex[i]);
         real.ActiveTexture(GL_TEXTURE0 + kScratchUnit);
         real.BindTexture(GL_TEXTURE_2D, sh.tex[i]);
-        real.TexStorage2D(GL_TEXTURE_2D, 1, sh.format, size, size);
+        real.TexStorage2D(GL_TEXTURE_2D, 1, sh.format, size * 2, size);
         real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -918,21 +922,27 @@ void castShadow(const Bind& bind, bool instanced, Redraw&& redraw) {
         real.Clear(GL_DEPTH_BUFFER_BIT);
         real.ClearDepthf(clearDepth);
     }
-
+    
+    auto drawCascade = [&](int cascade, GLint passLoc) {
+        real.Viewport(cascade * sh.size, 0, sh.size, sh.size);
+        real.Uniform4f(passLoc, 1.0f, static_cast<float>(cascade), 0.0f, 0.0f);
+        redraw();
+    };
+    
     // draws into the all-casters map: opaque colour output must not be blended, masked or alpha-tested away
     auto drawAll = [&](GLint passLoc) {
         real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, sh.allFbo[sh.write]);
         real.Disable(GL_BLEND);
         real.ColorMask(1, 1, 1, 1);
-        real.Uniform4f(passLoc, 1.0f, 0.0f, 0.0f, 0.0f);
-        redraw();
+        drawCascade(0, passLoc);
+        drawCascade(1, passLoc);
         real.Uniform4f(passLoc, 0.0f, 0.0f, 0.0f, 0.0f);
     };
 
     if (opaque) {
         real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, sh.fbo[sh.write]);
-        real.Uniform4f(units->shadowPassLoc, 1.0f, 0.0f, 0.0f, 0.0f);
-        redraw();
+        drawCascade(0, units->shadowPassLoc);
+        drawCascade(1, units->shadowPassLoc);
         real.Uniform4f(units->shadowPassLoc, 0.0f, 0.0f, 0.0f, 0.0f);
         // opaque caster that comes after the first transparent one: keep the all-casters depth complete
         if (colour) drawAll(units->shadowPassLoc);
@@ -944,7 +954,7 @@ void castShadow(const Bind& bind, bool instanced, Redraw&& redraw) {
             real.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
             real.BindFramebuffer(GL_READ_FRAMEBUFFER, sh.fbo[sh.write]);
             real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, sh.allFbo[sh.write]);
-            real.BlitFramebuffer(0, 0, sh.size, sh.size, 0, 0, sh.size, sh.size, GL_DEPTH_BUFFER_BIT, static_cast<GLenum>(GL_NEAREST));
+            real.BlitFramebuffer(0, 0, sh.size * 2, sh.size, 0, 0, sh.size * 2, sh.size, GL_DEPTH_BUFFER_BIT, static_cast<GLenum>(GL_NEAREST));
             real.BindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
             real.ColorMask(1, 1, 1, 1);
             real.ClearColor(1.0f, 1.0f, 1.0f, 0.0f);
@@ -991,6 +1001,7 @@ void onContextChanged(State& st, void* ctx) {
         st.copyFrame[k] = 0xFFFFFFFFu;
         st.failedFrames[k] = st.retries[k] = 0;
     }
+    st.pass = 0;
 }
 
 bool hasContext(State& st) {
@@ -1059,9 +1070,15 @@ void drawArraysInstancedDetour(GLenum mode, GLint first, GLsizei count, GLsizei 
 }
 
 void useProgramDetour(GLuint program) {
-    state().tr.program = static_cast<GLint>(program);
+    State& st = state();
+    if (static_cast<GLint>(program) != st.tr.program) ++st.pass;
+    st.tr.program = static_cast<GLint>(program);
     if (auto f = resolve(kUseProgram, real.UseProgram)) f(program);
 }
+// void useProgramDetour(GLuint program) {
+//     state().tr.program = static_cast<GLint>(program);
+//     if (auto f = resolve(kUseProgram, real.UseProgram)) f(program);
+// }
 void activeTextureDetour(GLenum texture) {
     state().tr.active = static_cast<GLint>(texture) - static_cast<GLint>(GL_TEXTURE0);
     if (auto f = resolve(kActiveTexture, real.ActiveTexture)) f(texture);
@@ -1158,6 +1175,10 @@ void endFrame(State& st) {
         st.sh.write ^= 1;
         st.sh.readValid = true;
     }
+    
+    st.copyPass[kScreen] = st.copyPass[kDepth] = 0xFFFFFFFFu;
+    st.pass = 0;
+    
     ++st.frame;
 }
 

@@ -69,7 +69,9 @@ void main() {
 
   #ifdef SHADOW
     // sunlight per colour channel: tinted when it passed through glass or water
-    albedo.rgb *= mix(vec3_splat(SHADOW_BRIGHTNESS), vec3_splat(1.0), shadowLit(v_shadow, dot(normalize(v_normal), v_sun)));
+    highp vec3 n = normalize(v_normal);
+    highp vec3 L = normalize(v_sun);
+    albedo.rgb *= mix(vec3_splat(SHADOW_BRIGHTNESS), vec3_splat(1.0), shadowLit(v_shadow, dot(n, L)));
   #endif
 
   #ifdef TRANSPARENT

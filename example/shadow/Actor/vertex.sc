@@ -46,7 +46,7 @@ void main() {
       v_texcoord0 = texcoord0;
       v_color0 = a_color0;
       gl_Position = ui ? vec4(0.0, 0.0, 2.0, 1.0)
-                       : shadowCaster(worldPosition - ViewPositionAndTime.xyz, sunDirection());
+                       : shadowCaster(worldPosition - ViewPositionAndTime.xyz, sunDirection(), ShadowPass.y);
       return;
     }
   #endif

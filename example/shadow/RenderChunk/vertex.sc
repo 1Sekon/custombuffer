@@ -55,7 +55,7 @@ void main() {
     if (casting) {
       v_color0 = color;
       v_texcoord0 = uv0;
-      gl_Position = shadowCaster(worldPos, sunDirection());
+      gl_Position = shadowCaster(worldPos, sunDirection(), ShadowPass.x > 0.5 ? ShadowPass.y : ShadowTransparentPass.y);
       return;
     }
   #endif
@@ -73,7 +73,7 @@ void main() {
   gl_Position = position;
 
   v_shadow = vec4(0.0, 0.0, 1.0, 0.0);   // w = 0: no shadow lookup
-  v_rel = worldPos;
+  v_rel = worldPos - ViewPositionAndTime.xyz;
   v_sun = vec3(0.0, 1.0, 0.0);
   #ifdef SHADOW_RECEIVE
     vec3 L = sunDirection();
